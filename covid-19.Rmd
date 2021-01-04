@@ -1,0 +1,162 @@
+---
+title: "initial exploration"
+author: "Emma Godfrey"
+date: "11/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("tidyverse")
+library("stringr")
+library("readxl")
+mask.usage <- read.csv("~/GitRepos/COVID-19.socialdistancing/mask.csv")
+updata.cases <- read.csv("~/GitRepos/COVID-19.socialdistancing/updata.cases.csv")
+ozone_county_population <- read_excel("~/Downloads/ozone-county-population.xlsx")
+ozone_county_population <- ozone_county_population[,-5]
+
+# put the state and county fips into one column to create a unique ID
+ozone_county_population <- mutate(ozone_county_population, fips = paste0(ozone_county_population$`STATE FIPS`, ozone_county_population$`COUNTY FIPS`)) 
+# remove the 0
+ozone_county_population[,7] <- gsub("^0", "", ozone_county_population$fips)
+ozone_county_population[,7] <- as.numeric(unlist(ozone_county_population[,7]))
+ozone_county_population <- ozone_county_population[,-c(1,2,3,4)]
+```
+
+```{r}
+joined.data <- inner_join(updata.cases, mask.usage, by = c("fips"="COUNTYFP"))
+
+joined.data2 <- inner_join(joined.data, ozone_county_population, by = "fips")
+
+```
+
+```{r}
+library("maps")
+library("ggplot2")
+
+Main_counties <- map_data("county")
+Main_states <- map_data("state")
+
+ggplot() + 
+  geom_polygon( data=Main_counties, aes(x=long, y=lat, group=group),
+                color="black", fill="blue")
+
+joined.data2[,2] <- tolower(joined.data2[,2])
+names(joined.data2)[16] <- "population"
+
+merged_counties <- inner_join(joined.data2, Main_counties, by = c("county" = "subregion"))
+merged_states <- inner_join(joined.data2, Main_states, by = c("county" = "subregion"))
+
+ggplot() + 
+  geom_polygon(data= merged_counties, aes(x = long, y= lat, group=group,fill = NEVER),
+               color = "white",size = 0.2)
+plot <- ggplot() + 
+  geom_polygon(data= merged_counties, aes(x = long, y= lat, group=group,fill = cases/population),size = 0.2) + labs(x= "Longitude", y = "Latitude") + 
+  geom_polygon(data=Main_states, aes(x=long, y=lat, group=group),
+                color="black", fill="lightblue",  size = 0.5, alpha = .3)
+
+plot
+```
+```{r}
+covid.19.world.cases.deaths.testing <- read.csv("~/Downloads/covid-19-world-cases-deaths-testing.csv")
+```
+```{r}
+library("choroplethrMaps")
+library("rworldmap")
+
+data(country.map, package = "choroplethrMaps")
+
+covid.19.world.cases.deaths.testing[,3] <- tolower(covid.19.world.cases.deaths.testing[,3])
+
+names(covid.19.world.cases.deaths.testing)[3] <- "region"
+
+# most recent case count
+plot.data <- covid.19.world.cases.deaths.testing %>% 
+  filter(date == "2020-11-19") %>%
+  rename(value = total_cases)
+
+joined.data <- joinCountryData2Map( plot.data, joinCode = "NAME", nameJoinColumn = "region")
+
+par(mai=c(0,0,0.2,0),xaxs="i",yaxs="i")
+mapCountryData(joined.data, nameColumnToPlot="new_cases_per_million")
+```
+```{r}
+#library("forecastxgb")
+library("timetk")
+library("xts")
+library("lubridate")
+library("tidymodels")
+library("modeltime")
+library("tidyverse")
+
+covid.19.world.cases.deaths.testing$date <- as.Date(covid.19.world.cases.deaths.testing$date)
+
+ts.new.cases <- xts(covid.19.world.cases.deaths.testing$new_cases, covid.19.world.cases.deaths.testing$date)
+
+covid.19.world.cases.deaths.testing %>% 
+  filter(region == c("united states", "sweden")) %>%
+  group_by(region) %>%
+  plot_time_series(date, new_cases,
+                   .facet_ncol=1)
+
+covid.19.world.cases.deaths.testing %>%
+  filter(region == "united states") %>%
+  filter(!is.na(new_cases)) %>%
+  plot_anomaly_diagnostics(date, new_deaths, .interactive = FALSE)
+
+names(covid.19.world.cases.deaths.testing)[6] <- "new_cases"
+
+df <- covid.19.world.cases.deaths.testing %>% 
+  select(date, region, new_cases_per_million) %>% 
+  filter(region == c("united states"))
+
+ggplot(df, aes(x=date, y= new_cases_per_million)) +
+  geom_line(aes(color = region), size = 1) +
+  theme_minimal() +
+  stat_smooth(aes(color=region))
+
+df2 <- covid.19.world.cases.deaths.testing %>% 
+  filter(region == c("united states")) %>% 
+  mutate(total_cases = ifelse(is.na(total_cases), 0, total_cases),
+         total_cases_per_million = ifelse(is.na(total_cases_per_million), 0 , total_cases_per_million),
+         total_deaths = ifelse(is.na(total_deaths), 0, total_deaths),
+         total_deaths_per_million = ifelse(is.na(total_deaths_per_million), 0, total_deaths_per_million),
+         new_cases_smoothed = ifelse(is.na(new_cases_smoothed), 0, new_cases_smoothed),
+         new_deaths_smoothed = ifelse(is.na(new_deaths_smoothed), 0, new_deaths_smoothed),
+         new_cases_smoothed_per_million = ifelse(is.na(new_cases_smoothed_per_million), 0, new_cases_smoothed_per_million),
+         new_deaths_smoothed_per_million = ifelse(is.na(new_deaths_smoothed_per_million), 0, new_deaths_smoothed_per_million))
+
+df2
+# for reproducibility
+set.seed(100)
+sample <- sample(nrow(df2), 0.8*nrow(df2))
+training <- df2[sample,]
+testing <- df2[-sample,]
+
+# evaluation criteria ...mean absolute prediction error
+mape <- function(actual,pred){
+  mape <- mean(abs((actual - pred)/actual))*100
+  return (mape)
+}
+library("naniar")
+ggplot(df2, aes(x=date, y = total_cases)) + geom_miss_point()
+
+
+library("randomForest")
+rf <- randomForest(new_cases ~., data = training)
+```
+```{r}
+library("covid19.analytics")
+
+cov19.us.cases <- covid19.data("aggregated")
+cov19.us.cases
+cov19.us <- cov19.us.cases %>% 
+  filter(Country_Region == "US")
+
+
+US_elect_county <- read_excel("~/Downloads/US_elect_county.xls")
+
+
+```
+
